@@ -168,7 +168,7 @@ size_t EventLoop::queueSize() const
 	return pendingFunctors_.size();
 }
 
-TimerId EventLoop::runcAt(const Timestamp &time, const TimerCallback &cb)
+TimerId EventLoop::runAt(const Timestamp &time, const TimerCallback &cb)
 {
 	return timerQueue_->addTimer(cb, time, 0.0);
 }
@@ -179,4 +179,96 @@ TimerId EventLoop::runAfter(double delay, const TimerCallback &cb)
 	return runAt(time, cb);
 }
 
+TimerId EventLoop::runEvery(double interval, const TimerCallback &cb)
+{
+	Timestamp time(addTime(Timestamp::now(), interval));
+	return timerQueue_->addTimer(cb, time, interval);
+}
 
+void EventLoop::cancel(TimerId timerId)
+{
+	return timerQueue_->cancel(timerId);
+}
+
+void EventLoop::updateChannel(Channel *channel)
+{
+	assert(channel->ownerLoop() == this);
+	assertInLoopThread();
+	poller_->updateChannel(channel);
+}
+
+void EventLoop::removeChannel(Channel *channel)
+{
+	assert(channel->ownerLoop() == this);
+	assertInLoopThread();
+	if (eventHandling_)
+	{
+		// 断言不是当前活跃的channel，也不是有效channel
+		assert(currentActiveChannel_ == channel || 
+				std::find(activeChannels_begin(), activeChannels_.end(), channel) == activeChannels_.end());
+	}
+	poller_->removeChannel(channel);
+}
+
+bool EventLoop::hasChannel(Channel *channel)
+{
+	// 断言channel属于当前loop
+	assert(channel->ownerLoop() == this);
+	// 断言在loop线程中
+	assertInLoopThread();
+	return poller_->hasChannel(channel);
+}
+
+void EventLoop::abortNotInLoopThread()
+{
+	LOG_FATAL << "EventLoop::abortNotInLoopThread - EventLoop " << this 
+		<< " was created in threadId_ = " << threadId_ 
+		<< ", current thread id = " << CurrentThread::tid();
+}
+
+void EventLoop::wakeup()
+{
+	uint64_t one = 1;
+	ssize_t n = sockets::write(wakeupFd_, &one, sizeof(one));
+	if (n != sizeof(one))
+	{
+		LOG_ERROR << "EventLoop::wakeup() writes " << n << " bytes instead of 8";
+	}
+}
+
+void EventLoop::handleRead()
+{
+	uint64_t one = 1;
+	ssize_t n = sockets::read(wakeupFd_, &one, sizeof(one));
+	if (n != sizeof(one))
+	{
+		LOG_ERROR << "EvnetLoop::handleRead() reads " << n << " bytes instead of 8";
+	}
+}
+
+void EventLoop::doPendingFunctors()
+{
+	std::vector<Functor> functors;
+	callingPendingFunctors_ = true;
+	
+	{
+		// 拷贝到临时变量，缩短临界区
+		MutexLockGuard lock(mutex_);
+		functors.swap(pendingFunctors_);
+	}
+
+	for (size_t i = 0; i < functors.size(); ++i)
+	{
+		functors[i]();
+	}
+	callingPendingFunctors_ = true;
+}
+
+void EventLoop::printActiveChannels() const
+{
+	for (ChannelList::const_iterator it = activeChannels_.begin(); it != activeChannels_.end(); ++it)
+	{
+		const Channel *ch = *it;
+		LOG_TRACE << "{" << ch->reventsToString() << "} ";
+	}
+}
